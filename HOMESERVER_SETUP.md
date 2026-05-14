@@ -46,7 +46,19 @@ sudo apt update && sudo apt upgrade -y
 sudo reboot
 ```
 
-### 4. Set Static IP (Optional - or configure in router)
+### 4. Disable Wi-Fi (Ethernet-only)
+```bash
+# Delete Wi-Fi connection profile
+nmcli con show
+sudo nmcli con delete <wifi-connection-name>
+
+# Optional: hard block Wi-Fi at kernel level
+echo 'dtoverlay=disable-wifi' | sudo tee -a /boot/config.txt
+```
+
+### 5. Set Static IP
+
+**Method A — Raspberry Pi OS (dhcpcd):**
 ```bash
 sudo nano /etc/dhcpcd.conf
 ```
@@ -54,10 +66,33 @@ sudo nano /etc/dhcpcd.conf
 Add at end:
 ```conf
 interface eth0
-static ip_address=192.168.254.109/24
-static routers=192.168.254.1
-static domain_name_servers=192.168.254.1
+static ip_address=192.168.254.99/24
+static routers=192.168.254.254
+static domain_name_servers=192.168.254.254
 ```
+
+**Method B — Debian 13+ (NetworkManager — used in this guide):**
+```bash
+# Check router gateway first
+ip route show default
+
+# Use nmtui (interactive) or nmcli (direct)
+# Find your connection name first:
+nmcli con show
+
+# Set static IP via nmcli (replace UUID from above)
+sudo nmcli con mod <uuid> \
+  ipv4.method manual \
+  ipv4.addresses 192.168.254.99/24 \
+  ipv4.gateway 192.168.254.254 \
+  ipv4.dns "1.1.1.1,8.8.8.8" \
+  ipv4.ignore-auto-dns yes
+
+# Apply
+sudo nmcli con up <uuid>
+```
+
+> **Important:** Find your router's gateway first — common values are `192.168.254.254`, `192.168.1.1`, `192.168.0.1`. Run `ip route` and look for the `default via <ip>` line. The old guide used `192.168.254.1` which is wrong for most GlobeAtHome routers.
 
 ---
 
@@ -99,7 +134,7 @@ sudo apt install -y curl git lsb-release ca-certificates jq
 curl -sSL https://install.pi-hole.net | bash
 
 # Follow prompts:
-# - Static IP: Use current IP (192.168.254.109)
+# - Static IP: Use current IP (e.g. 192.168.254.99)
 # - Upstream DNS: Google/Cloudflare (will change later)
 # - Install web interface: Yes
 # - Log queries: Yes
@@ -141,8 +176,29 @@ sudo pihole setpassword '320240123'
 
 **In Tailscale Admin Console** (https://login.tailscale.com/admin):
 1. Go to DNS settings
-2. Add nameserver: `100.111.98.30` (your homeserver's Tailscale IP)
+2. Add nameserver: `<homeserver-tailscale-ip>` (e.g. `100.111.98.30`)
 3. Remove old/offline nameservers
+
+### 4. System DNS → Pi-hole + Unbound
+
+After Pi-hole is running, point the Pi itself at its own Pi-hole:
+
+```bash
+# Stop Tailscale from managing resolv.conf
+sudo tailscale set --accept-dns=false
+
+# Set system DNS to local Pi-hole via NetworkManager
+sudo nmcli con mod <ethernet-uuid> ipv4.dns "127.0.0.1"
+sudo nmcli con up <ethernet-uuid>
+
+# Verify
+cat /etc/resolv.conf
+# Should show: nameserver 127.0.0.1 (managed by NetworkManager)
+dig google.com
+# Should resolve successfully
+```
+
+Now the DNS chain is: `App → 127.0.0.1 → Pi-hole → 127.0.0.1#5335 → Unbound → root servers`
 
 ---
 
@@ -151,13 +207,13 @@ sudo pihole setpassword '320240123'
 ### Router DNS Settings
 Set your router's DNS to:
 ```
-192.168.254.109
+192.168.254.99
 ```
 
 ### Device DNS
 | Device Type | DNS Server |
 |-------------|-------------|
-| Home network | 192.168.254.109 |
+| Home network | 192.168.254.99 |
 | Tailscale | 100.111.98.30 or homeserver.tailcbdea4.ts.net |
 
 ---
@@ -166,8 +222,8 @@ Set your router's DNS to:
 
 | Service | Local URL | Tailscale URL |
 |---------|------------|---------------|
-| Pi-hole Admin | http://192.168.254.109/admin | http://100.111.98.30/admin |
-| Pi-hole API | http://192.168.254.109/admin/api.php | http://100.111.98.30/admin/api.php |
+| Pi-hole Admin | http://192.168.254.99/admin | http://100.111.98.30/admin |
+| Pi-hole API | http://192.168.254.99/admin/api.php | http://100.111.98.30/admin/api.php |
 
 **Login:** `320240123`
 
@@ -183,7 +239,7 @@ systemctl status pihole-FTL
 
 # Test DNS resolution
 dig @127.0.0.1 google.com
-nslookup pi.hole 192.168.254.109
+nslookup pi.hole 192.168.254.99
 
 # Check ports
 ss -tlnp | grep -E '53|5335|80|443'
